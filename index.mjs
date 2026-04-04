@@ -184,41 +184,40 @@ function buildTelegramMessage(eventArgs, from, txHash, inputData) {
     });
   }
 
-  lines.push('',
+  // Image URL goes at the very end so Telegram auto-previews it
+  if (image) lines.push('', image);
+  else lines.push('',
     `🔗 <a href="https://basescan.org/tx/${txHash}">View TX</a>  |  ` +
     `<a href="https://basescan.org/token/${a.tokenAddress}">Token</a>`
   );
+
+  // If there's an image, add links before it so they don't get previewed
+  if (image) {
+    lines.splice(lines.length - 1, 0,
+      `🔗 <a href="https://basescan.org/tx/${txHash}">View TX</a>  |  ` +
+      `<a href="https://basescan.org/token/${a.tokenAddress}">Token</a>`
+    );
+  }
+
   return { text: lines.join('\n'), image };
 }
 
 // ─── Telegram ─────────────────────────────────────────────────────────────────
-async function sendTelegram(text, imageUrl = null) {
+async function sendTelegram(text, hasImage = false) {
   try {
-    let url, body;
-    if (imageUrl) {
-      // Send as photo with caption
-      url = `https://api.telegram.org/bot${TG_TOKEN}/sendPhoto`;
-      body = { chat_id: TG_CHAT, photo: imageUrl, caption: text, parse_mode: 'HTML' };
-    } else {
-      // Send as text message
-      url = `https://api.telegram.org/bot${TG_TOKEN}/sendMessage`;
-      body = { chat_id: TG_CHAT, text, parse_mode: 'HTML', disable_web_page_preview: true };
-    }
-    const res = await fetch(url, {
+    const res = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      body: JSON.stringify({
+        chat_id: TG_CHAT,
+        text,
+        parse_mode: 'HTML',
+        // Allow preview only when there's an image URL at the end
+        disable_web_page_preview: !hasImage,
+      }),
     });
     const json = await res.json();
-    if (!json.ok) {
-      // If sendPhoto fails (bad URL etc), fallback to text
-      if (imageUrl) {
-        console.warn('Photo send failed, falling back to text:', json.description);
-        await sendTelegram(text, null);
-      } else {
-        console.error('Telegram error:', json.description);
-      }
-    }
+    if (!json.ok) console.error('Telegram error:', json.description);
   } catch (e) { console.error('Telegram fetch error:', e.message); }
 }
 
@@ -241,7 +240,7 @@ async function processTx(txHash) {
         if (d.eventName !== 'TokenCreated') continue;
         console.log(`✅ ${d.args.tokenName} ($${d.args.tokenSymbol}) — ${txHash}`);
         const { text, image } = buildTelegramMessage(d.args, tx.from, txHash, tx.input);
-        await sendTelegram(text, image);
+        await sendTelegram(text, !!image);
         return;
       } catch {}
     }
