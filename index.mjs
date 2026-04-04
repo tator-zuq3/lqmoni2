@@ -16,8 +16,24 @@ const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TG_CHAT  = process.env.TELEGRAM_CHAT_ID;
 const PORT     = process.env.PORT || 3000;
 
+// ─── Filters ────────────────────────────────────────────────────────────────
+// Blacklist: comma-separated token names to skip (case-insensitive)
+// e.g. FILTER_NAMES=test,testing,aaa
+const FILTER_NAMES = (process.env.FILTER_NAMES || '')
+  .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+
+// VIP: send matching tokens to a second channel
+const VIP_CHAT      = process.env.VIP_CHAT_ID || '';
+const VIP_NAMES     = (process.env.VIP_NAMES || '')
+  .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+const VIP_DEPLOYERS = (process.env.VIP_DEPLOYERS || '')
+  .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+const VIP_ADMINS    = (process.env.VIP_ADMINS || '')
+  .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+const VIP_REWARD_ADMINS = (process.env.VIP_REWARD_ADMINS || '')
+  .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+
 // Convert Alchemy http url → wss url automatically
-// https://base-mainnet.g.alchemy.com/v2/KEY → wss://base-mainnet.g.alchemy.com/v2/KEY
 const RPC_WS = RPC_HTTP.replace('https://', 'wss://').replace('http://', 'ws://');
 
 if (!TG_TOKEN || !TG_CHAT) {
@@ -203,16 +219,15 @@ function buildTelegramMessage(eventArgs, from, txHash, inputData) {
 }
 
 // ─── Telegram ─────────────────────────────────────────────────────────────────
-async function sendTelegram(text, hasImage = false) {
+async function sendTelegram(text, hasImage = false, chatId = TG_CHAT) {
   try {
     const res = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        chat_id: TG_CHAT,
+        chat_id: chatId,
         text,
         parse_mode: 'HTML',
-        // Allow preview only when there's an image URL at the end
         disable_web_page_preview: !hasImage,
       }),
     });
@@ -238,9 +253,42 @@ async function processTx(txHash) {
       try {
         const d = decodeEventLog({ abi: [TOKEN_CREATED_EVENT], data: log.data, topics: log.topics });
         if (d.eventName !== 'TokenCreated') continue;
-        console.log(`✅ ${d.args.tokenName} ($${d.args.tokenSymbol}) — ${txHash}`);
+
+        const tokenName   = d.args.tokenName  || '';
+        const tokenSymbol = d.args.tokenSymbol || '';
+        const deployer    = tx.from.toLowerCase();
+        const admin       = (d.args.tokenAdmin || '').toLowerCase();
+
+        // Decode rewards for VIP check
+        const { admins: rewardAdmins } = decodeRewards(tx.input);
+
+        // === Blacklist: skip tokens with filtered names ===
+        const nameLower = tokenName.toLowerCase();
+        const symbolLower = tokenSymbol.toLowerCase();
+        if (FILTER_NAMES.some(f => nameLower === f || symbolLower === f)) {
+          console.log(`⏭️  Filtered: ${tokenName} ($${tokenSymbol}) — blacklisted name`);
+          return;
+        }
+
+        console.log(`✅ ${tokenName} ($${tokenSymbol}) — ${txHash}`);
         const { text, image } = buildTelegramMessage(d.args, tx.from, txHash, tx.input);
-        await sendTelegram(text, !!image);
+
+        // Send to main channel
+        await sendTelegram(text, !!image, TG_CHAT);
+
+        // === VIP: check if should also send to second channel ===
+        if (VIP_CHAT) {
+          const isVip =
+            VIP_NAMES.some(n => nameLower.includes(n) || symbolLower.includes(n)) ||
+            VIP_DEPLOYERS.includes(deployer) ||
+            VIP_ADMINS.includes(admin) ||
+            VIP_REWARD_ADMINS.some(va => rewardAdmins.includes(va));
+
+          if (isVip) {
+            await sendTelegram('⭐ VIP\n\n' + text, !!image, VIP_CHAT);
+            console.log(`  ⭐ Also sent to VIP channel`);
+          }
+        }
         return;
       } catch {}
     }
