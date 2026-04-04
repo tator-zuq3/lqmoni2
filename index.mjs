@@ -1,28 +1,31 @@
 /**
  * lqmoni — Liquid Protocol Monitor Bot
- * Single file. Alchemy webhook → Telegram channel.
- * On start: sends the latest token deployment to Telegram (smoke test).
- * Then: receives Alchemy webhooks in real-time.
+ * WebSocket real-time subscription → Telegram notifications
+ * Express server just for Railway health check.
+ * 
+ * env: RPC_URL, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
  */
 import express from 'express';
-import { createPublicClient, http, decodeEventLog, decodeFunctionData } from 'viem';
+import { createPublicClient, webSocket, http, decodeEventLog, decodeFunctionData } from 'viem';
 import { base } from 'viem/chains';
-import { createHmac } from 'crypto';
 
-// ─── Config ────────────────────────────────────────────────────────────────
-const FACTORY     = process.env.FACTORY_ADDRESS  || '0x04F1a284168743759BE6554f607a10CEBdB77760';
-const RPC_URL     = process.env.RPC_URL          || 'https://mainnet.base.org';
-const TG_TOKEN    = process.env.TELEGRAM_BOT_TOKEN;
-const TG_CHAT     = process.env.TELEGRAM_CHAT_ID;
-const SIGN_KEY    = process.env.ALCHEMY_SIGNING_KEY || ''; // optional: verify webhook signature
-const PORT        = process.env.PORT || 3000;
+// ─── Config ─────────────────────────────────────────────────────────────────
+const FACTORY  = process.env.FACTORY_ADDRESS   || '0x04F1a284168743759BE6554f607a10CEBdB77760';
+const RPC_HTTP = process.env.RPC_URL           || 'https://mainnet.base.org';
+const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TG_CHAT  = process.env.TELEGRAM_CHAT_ID;
+const PORT     = process.env.PORT || 3000;
+
+// Convert Alchemy http url → wss url automatically
+// https://base-mainnet.g.alchemy.com/v2/KEY → wss://base-mainnet.g.alchemy.com/v2/KEY
+const RPC_WS = RPC_HTTP.replace('https://', 'wss://').replace('http://', 'ws://');
 
 if (!TG_TOKEN || !TG_CHAT) {
   console.error('❌ Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID');
   process.exit(1);
 }
 
-// ─── Constants ─────────────────────────────────────────────────────────────
+// ─── Constants ───────────────────────────────────────────────────────────────
 const HOOKS = {
   '0x9811f10cd549c754fa9e5785989c422a762c28cc': 'StaticFee',
   '0x80e2f7dc8c2c880bbc4bdf80a5fb0eb8b1db68cc': 'DynamicFee',
@@ -56,7 +59,6 @@ const TOKEN_CREATED_EVENT = {
   ],
 };
 
-// ABI for decoding input data (selector 0xdf40224a)
 const DEPLOY_ABI = [{
   type: 'function', name: 'deployToken', stateMutability: 'payable',
   inputs: [{ name: 'c', type: 'tuple', components: [
@@ -88,45 +90,44 @@ const DEPLOY_ABI = [{
   outputs: [{ type: 'address' }],
 }];
 
-// ─── Viem client ────────────────────────────────────────────────────────────
-const client = createPublicClient({ chain: base, transport: http(RPC_URL) });
+// ─── Viem clients ────────────────────────────────────────────────────────────
+// HTTP for fetching TX data, WS for real-time event subscription
+const httpClient = createPublicClient({ chain: base, transport: http(RPC_HTTP) });
+const wsClient   = createPublicClient({ chain: base, transport: webSocket(RPC_WS) });
 
-// ─── Helpers ────────────────────────────────────────────────────────────────
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 function tickToMcap(tick) {
   const m = Math.pow(1.0001, Number(tick)) * 100_000_000_000;
-  if (m >= 1000) return `${(m/1000).toFixed(1)}K ETH`;
+  if (m >= 1000) return `${(m / 1000).toFixed(1)}K ETH`;
   if (m >= 1)    return `${m.toFixed(1)} ETH`;
   return `${m.toFixed(4)} ETH`;
 }
 
 function esc(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-function decodeInput(input) {
+function decodeRewards(inputData) {
   try {
-    const { args } = decodeFunctionData({ abi: DEPLOY_ABI, data: input });
+    const { args } = decodeFunctionData({ abi: DEPLOY_ABI, data: inputData });
     const lc = args[0].lockerConfig;
     return {
-      rewardAdmins:     (lc.rewardAdmins     || []).map(a => a.toLowerCase()),
-      rewardRecipients: (lc.rewardRecipients || []).map(a => a.toLowerCase()),
+      admins:     (lc.rewardAdmins     || []).map(a => a.toLowerCase()),
+      recipients: (lc.rewardRecipients || []).map(a => a.toLowerCase()),
     };
-  } catch { return { rewardAdmins: [], rewardRecipients: [] }; }
+  } catch { return { admins: [], recipients: [] }; }
 }
 
-function buildMessage(eventArgs, from, txHash, inputData) {
+function buildTelegramMessage(eventArgs, from, txHash, inputData) {
   const a = eventArgs;
-  const hook  = HOOKS[(a.poolHook  || '').toLowerCase()] || a.poolHook;
-  const mev   = MEVS[(a.mevModule  || '').toLowerCase()] || a.mevModule;
+  const hook   = HOOKS[(a.poolHook  || '').toLowerCase()] || a.poolHook;
+  const mev    = MEVS[(a.mevModule  || '').toLowerCase()] || a.mevModule;
   const paired = (a.pairedToken || '').toLowerCase() === WETH.toLowerCase() ? 'WETH' : a.pairedToken;
-  const mcap  = tickToMcap(a.startingTick);
+  const { admins, recipients } = decodeRewards(inputData);
 
-  let meta = {};
-  let ctx  = {};
+  let meta = {}, ctx = {};
   try { meta = JSON.parse(a.tokenMetadata || '{}'); } catch {}
   try { ctx  = JSON.parse(a.tokenContext  || '{}'); } catch {}
-
-  const { rewardAdmins, rewardRecipients } = decodeInput(inputData);
 
   const lines = [
     `🪙 <b>${esc(a.tokenName)} ($${esc(a.tokenSymbol)})</b>`,
@@ -136,60 +137,62 @@ function buildMessage(eventArgs, from, txHash, inputData) {
     `👑 <b>Admin:</b> <code>${a.tokenAdmin}</code>`,
   ];
   if (a.tokenImage) lines.push(`🖼️ <b>Image:</b> ${esc(a.tokenImage)}`);
-
-  lines.push('',
-    `📊 <b>Market Cap:</b> ${esc(mcap)}`,
+  lines.push(
+    '',
+    `📊 <b>Market Cap:</b> ${esc(tickToMcap(a.startingTick))}`,
     `🌊 <b>Hook:</b> ${esc(hook)}`,
     `💱 <b>Paired:</b> ${esc(paired)}`,
     `🛡️ <b>MEV:</b> ${esc(mev)}`,
   );
 
-  if (rewardAdmins.length > 0) {
+  if (admins.length > 0) {
     lines.push('');
-    rewardAdmins.forEach((a, i) =>    lines.push(`💰 <b>Reward Admin ${i+1}:</b> <code>${a}</code>`));
-    rewardRecipients.forEach((r, i) => lines.push(`💰 <b>Reward Recipient ${i+1}:</b> <code>${r}</code>`));
+    admins.forEach((addr, i) =>      lines.push(`💰 <b>Reward Admin ${i+1}:</b> <code>${addr}</code>`));
+    recipients.forEach((addr, i) =>  lines.push(`💰 <b>Reward Recipient ${i+1}:</b> <code>${addr}</code>`));
   }
 
   if (Object.keys(meta).length > 0) {
     lines.push('', '📝 <b>Metadata:</b>');
     if (meta.description) lines.push(`   • ${esc(meta.description)}`);
     (meta.socialMediaUrls || []).forEach(s => lines.push(`   • <b>${esc(s.platform)}:</b> ${esc(s.url)}`));
-    const known = new Set(['description','socialMediaUrls']);
-    Object.entries(meta).forEach(([k,v]) => { if (!known.has(k)) lines.push(`   • <b>${esc(k)}:</b> ${esc(String(v))}`); });
+    const known = new Set(['description', 'socialMediaUrls']);
+    Object.entries(meta).forEach(([k, v]) => { if (!known.has(k)) lines.push(`   • <b>${esc(k)}:</b> ${esc(String(v))}`); });
   }
 
   if (Object.keys(ctx).length > 0) {
     lines.push('', '🏷️ <b>Context:</b>');
-    Object.entries(ctx).forEach(([k,v]) => lines.push(`   • <b>${esc(k)}:</b> ${esc(String(v))}`));
+    Object.entries(ctx).forEach(([k, v]) => lines.push(`   • <b>${esc(k)}:</b> ${esc(String(v))}`));
   }
 
   lines.push('',
     `🔗 <a href="https://basescan.org/tx/${txHash}">View TX</a>  |  ` +
     `<a href="https://basescan.org/token/${a.tokenAddress}">Token</a>`
   );
-
   return lines.join('\n');
 }
 
-// ─── Telegram ───────────────────────────────────────────────────────────────
+// ─── Telegram ─────────────────────────────────────────────────────────────────
 async function sendTelegram(text) {
-  const url = `https://api.telegram.org/bot${TG_TOKEN}/sendMessage`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: TG_CHAT, text, parse_mode: 'HTML', disable_web_page_preview: true }),
-  });
-  const json = await res.json();
-  if (!json.ok) console.error('Telegram error:', json.description);
-  return json.ok;
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: TG_CHAT, text, parse_mode: 'HTML', disable_web_page_preview: true }),
+    });
+    const json = await res.json();
+    if (!json.ok) console.error('Telegram error:', json.description);
+  } catch (e) { console.error('Telegram fetch error:', e.message); }
 }
 
-// ─── Process a TX hash ──────────────────────────────────────────────────────
+// ─── Process a TX ─────────────────────────────────────────────────────────────
+const processed = new Set();
 async function processTx(txHash) {
+  if (processed.has(txHash)) return;
+  processed.add(txHash);
   try {
     const [tx, receipt] = await Promise.all([
-      client.getTransaction({ hash: txHash }),
-      client.getTransactionReceipt({ hash: txHash }),
+      httpClient.getTransaction({ hash: txHash }),
+      httpClient.getTransactionReceipt({ hash: txHash }),
     ]);
     if (receipt.status !== 'success') return;
 
@@ -198,95 +201,69 @@ async function processTx(txHash) {
       try {
         const d = decodeEventLog({ abi: [TOKEN_CREATED_EVENT], data: log.data, topics: log.topics });
         if (d.eventName !== 'TokenCreated') continue;
-        const msg = buildMessage(d.args, tx.from, txHash, tx.input);
-        await sendTelegram(msg);
-        console.log(`✅ Sent: ${d.args.tokenName} ($${d.args.tokenSymbol}) — ${txHash}`);
+        console.log(`✅ ${d.args.tokenName} ($${d.args.tokenSymbol}) — ${txHash}`);
+        await sendTelegram(buildTelegramMessage(d.args, tx.from, txHash, tx.input));
         return;
       } catch {}
     }
-  } catch (e) {
-    console.error(`⚠️ processTx error [${txHash}]:`, e.message);
-  }
+  } catch (e) { console.error(`⚠️ Error [${txHash}]:`, e.message); }
 }
 
-// ─── Startup: fetch latest deployment ──────────────────────────────────────
-async function startupTest() {
-  console.log('🔍 Fetching latest deployment...');
+// ─── Startup smoke test: send latest deployment ───────────────────────────────
+async function sendLatestDeployment() {
+  console.log('🔍 Fetching latest deployment for smoke test...');
   try {
-    const block = await client.getBlockNumber();
-    // Scan last 10 blocks (Alchemy free limit)
-    const logs = await client.getLogs({
+    const block = await httpClient.getBlockNumber();
+    // Alchemy free: max 10 blocks per getLogs
+    const logs = await httpClient.getLogs({
       address: FACTORY,
       event: TOKEN_CREATED_EVENT,
       fromBlock: block - 9n,
       toBlock: block,
     });
-
     if (logs.length > 0) {
-      const latest = logs[logs.length - 1];
-      console.log(`📦 Found latest TX: ${latest.transactionHash}`);
-      await sendTelegram(`🤖 <b>lqmoni bot started!</b>\nSending latest Liquid deployment as smoke test...`);
-      await processTx(latest.transactionHash);
+      const txHash = logs[logs.length - 1].transactionHash;
+      console.log(`📦 Latest TX: ${txHash}`);
+      await sendTelegram(`🤖 <b>lqmoni started!</b>\nSending latest deployment as smoke test...`);
+      await processTx(txHash);
     } else {
-      await sendTelegram(`🤖 <b>lqmoni bot started!</b>\nNo new deployments in last 10 blocks. Watching for new ones...`);
-      console.log('No recent deployments found in last 10 blocks.');
+      await sendTelegram(`🤖 <b>lqmoni started!</b>\nNo deployments in last 10 blocks. Watching via WebSocket...`);
     }
   } catch (e) {
-    console.error('Startup test error:', e.message);
-    await sendTelegram(`🤖 <b>lqmoni bot started!</b>\nWatching for new Liquid Protocol deployments...`);
+    console.warn('Smoke test skipped:', e.message);
+    await sendTelegram(`🤖 <b>lqmoni started!</b>\nWatching for new Liquid Protocol deployments...`);
   }
 }
 
-// ─── Express server ─────────────────────────────────────────────────────────
+// ─── WebSocket real-time subscription ────────────────────────────────────────
+function startWebSocket() {
+  console.log(`🔌 WebSocket: ${RPC_WS.replace(/\/v2\/.*/, '/v2/***')}`);
+  wsClient.watchEvent({
+    address: FACTORY,
+    event: TOKEN_CREATED_EVENT,
+    onLogs: (logs) => {
+      for (const log of logs) {
+        console.log(`📨 New event: ${log.transactionHash}`);
+        processTx(log.transactionHash).catch(console.error);
+      }
+    },
+    onError: (err) => console.error('WS error:', err.message),
+  });
+  console.log('⚡ WebSocket subscribed — real-time monitoring active\n');
+}
+
+// ─── Express health check (required for Railway) ──────────────────────────────
 const app = express();
-app.use(express.json({
-  verify: (req, res, buf) => { req.rawBody = buf; } // for signature verification
-}));
-
-// Health check
-app.get('/', (req, res) => res.json({ status: 'ok', bot: 'lqmoni' }));
-
-// Alchemy webhook endpoint
-app.post('/webhook', async (req, res) => {
-  // Optional: verify Alchemy signature
-  if (SIGN_KEY) {
-    const sig = req.headers['x-alchemy-signature'];
-    const expected = createHmac('sha256', SIGN_KEY).update(req.rawBody).digest('hex');
-    if (sig !== expected) {
-      console.warn('⚠️  Invalid webhook signature');
-      return res.status(401).json({ error: 'invalid signature' });
-    }
-  }
-
-  res.json({ ok: true }); // Ack immediately
-
-  // Process webhook payload
-  try {
-    const body = req.body;
-
-    // Alchemy "Log Event" webhook format
-    const logs = body?.event?.data?.block?.logs || [];
-    for (const log of logs) {
-      const txHash = log.transaction?.hash;
-      if (!txHash) continue;
-      console.log(`📨 Webhook received: ${txHash}`);
-      // Use processTx which fetches full data
-      processTx(txHash).catch(console.error);
-    }
-  } catch (e) {
-    console.error('Webhook processing error:', e.message);
-  }
-});
-
-// ─── Start ──────────────────────────────────────────────────────────────────
+app.get('/', (_, res) => res.json({ status: 'ok', bot: 'lqmoni', uptime: process.uptime() }));
 app.listen(PORT, async () => {
-  console.log('═'.repeat(50));
-  console.log(`🤖 lqmoni — Liquid Protocol Monitor Bot`);
-  console.log(`   Factory: ${FACTORY}`);
-  console.log(`   RPC:     ${RPC_URL.replace(/\/v2\/.*/, '/v2/***')}`);
-  console.log(`   Chat:    ${TG_CHAT}`);
-  console.log(`   Port:    ${PORT}`);
-  console.log('═'.repeat(50));
-  await startupTest();
-  console.log('\n⏳ Waiting for Alchemy webhooks...\n');
+  console.log('══════════════════════════════════════════════════');
+  console.log('🤖 lqmoni — Liquid Protocol Monitor Bot');
+  console.log(`   Factory : ${FACTORY}`);
+  console.log(`   RPC     : ${RPC_HTTP.replace(/\/v2\/.*/, '/v2/***')}`);
+  console.log(`   Chat ID : ${TG_CHAT}`);
+  console.log(`   Port    : ${PORT}`);
+  console.log('══════════════════════════════════════════════════');
+
+  await sendLatestDeployment(); // smoke test
+  startWebSocket();             // real-time
 });
