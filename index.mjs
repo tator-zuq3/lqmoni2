@@ -118,6 +118,20 @@ function decodeRewards(inputData) {
   } catch { return { admins: [], recipients: [] }; }
 }
 
+function pickImage(eventArgs, meta, ctx) {
+  // Collect image from all possible sources, return the first valid URL found
+  const candidates = [
+    eventArgs.tokenImage,
+    meta?.image,
+    ctx?.image,
+    meta?.tokenImage,
+  ];
+  for (const c of candidates) {
+    if (c && typeof c === 'string' && c.startsWith('http')) return c;
+  }
+  return null;
+}
+
 function buildTelegramMessage(eventArgs, from, txHash, inputData) {
   const a = eventArgs;
   const hook   = HOOKS[(a.poolHook  || '').toLowerCase()] || a.poolHook;
@@ -129,6 +143,8 @@ function buildTelegramMessage(eventArgs, from, txHash, inputData) {
   try { meta = JSON.parse(a.tokenMetadata || '{}'); } catch {}
   try { ctx  = JSON.parse(a.tokenContext  || '{}'); } catch {}
 
+  const image = pickImage(a, meta, ctx);
+
   const lines = [
     `🪙 <b>${esc(a.tokenName)} ($${esc(a.tokenSymbol)})</b>`,
     '',
@@ -136,7 +152,7 @@ function buildTelegramMessage(eventArgs, from, txHash, inputData) {
     `👤 <b>Deployer:</b> <code>${from}</code>`,
     `👑 <b>Admin:</b> <code>${a.tokenAdmin}</code>`,
   ];
-  if (a.tokenImage) lines.push(`🖼️ <b>Image:</b> ${esc(a.tokenImage)}`);
+  if (image) lines.push(`🖼️ <b>Image:</b> ${esc(image)}`);
   lines.push(
     '',
     `📊 <b>Market Cap:</b> ${esc(tickToMcap(a.startingTick))}`,
@@ -147,40 +163,62 @@ function buildTelegramMessage(eventArgs, from, txHash, inputData) {
 
   if (admins.length > 0) {
     lines.push('');
-    admins.forEach((addr, i) =>      lines.push(`💰 <b>Reward Admin ${i+1}:</b> <code>${addr}</code>`));
-    recipients.forEach((addr, i) =>  lines.push(`💰 <b>Reward Recipient ${i+1}:</b> <code>${addr}</code>`));
+    admins.forEach((addr, i) =>     lines.push(`💰 <b>Reward Admin ${i+1}:</b> <code>${addr}</code>`));
+    recipients.forEach((addr, i) => lines.push(`💰 <b>Reward Recipient ${i+1}:</b> <code>${addr}</code>`));
   }
 
   if (Object.keys(meta).length > 0) {
     lines.push('', '📝 <b>Metadata:</b>');
     if (meta.description) lines.push(`   • ${esc(meta.description)}`);
     (meta.socialMediaUrls || []).forEach(s => lines.push(`   • <b>${esc(s.platform)}:</b> ${esc(s.url)}`));
-    const known = new Set(['description', 'socialMediaUrls']);
+    // Show other meta fields except image (already shown above)
+    const known = new Set(['description', 'socialMediaUrls', 'image', 'tokenImage']);
     Object.entries(meta).forEach(([k, v]) => { if (!known.has(k)) lines.push(`   • <b>${esc(k)}:</b> ${esc(String(v))}`); });
   }
 
   if (Object.keys(ctx).length > 0) {
     lines.push('', '🏷️ <b>Context:</b>');
-    Object.entries(ctx).forEach(([k, v]) => lines.push(`   • <b>${esc(k)}:</b> ${esc(String(v))}`));
+    // Show all context except image (already shown above)
+    Object.entries(ctx).forEach(([k, v]) => {
+      if (k !== 'image') lines.push(`   • <b>${esc(k)}:</b> ${esc(String(v))}`);
+    });
   }
 
   lines.push('',
     `🔗 <a href="https://basescan.org/tx/${txHash}">View TX</a>  |  ` +
     `<a href="https://basescan.org/token/${a.tokenAddress}">Token</a>`
   );
-  return lines.join('\n');
+  return { text: lines.join('\n'), image };
 }
 
 // ─── Telegram ─────────────────────────────────────────────────────────────────
-async function sendTelegram(text) {
+async function sendTelegram(text, imageUrl = null) {
   try {
-    const res = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
+    let url, body;
+    if (imageUrl) {
+      // Send as photo with caption
+      url = `https://api.telegram.org/bot${TG_TOKEN}/sendPhoto`;
+      body = { chat_id: TG_CHAT, photo: imageUrl, caption: text, parse_mode: 'HTML' };
+    } else {
+      // Send as text message
+      url = `https://api.telegram.org/bot${TG_TOKEN}/sendMessage`;
+      body = { chat_id: TG_CHAT, text, parse_mode: 'HTML', disable_web_page_preview: true };
+    }
+    const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: TG_CHAT, text, parse_mode: 'HTML', disable_web_page_preview: true }),
+      body: JSON.stringify(body),
     });
     const json = await res.json();
-    if (!json.ok) console.error('Telegram error:', json.description);
+    if (!json.ok) {
+      // If sendPhoto fails (bad URL etc), fallback to text
+      if (imageUrl) {
+        console.warn('Photo send failed, falling back to text:', json.description);
+        await sendTelegram(text, null);
+      } else {
+        console.error('Telegram error:', json.description);
+      }
+    }
   } catch (e) { console.error('Telegram fetch error:', e.message); }
 }
 
@@ -202,7 +240,8 @@ async function processTx(txHash) {
         const d = decodeEventLog({ abi: [TOKEN_CREATED_EVENT], data: log.data, topics: log.topics });
         if (d.eventName !== 'TokenCreated') continue;
         console.log(`✅ ${d.args.tokenName} ($${d.args.tokenSymbol}) — ${txHash}`);
-        await sendTelegram(buildTelegramMessage(d.args, tx.from, txHash, tx.input));
+        const { text, image } = buildTelegramMessage(d.args, tx.from, txHash, tx.input);
+        await sendTelegram(text, image);
         return;
       } catch {}
     }
