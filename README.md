@@ -15,7 +15,7 @@ Real-time Telegram notifications for [Liquid Protocol](https://liquidprotocol.xy
 |---|---|---|
 | `RPC_URL` | ✅ | `https://base-mainnet.g.alchemy.com/v2/YOUR_KEY` |
 | `TELEGRAM_BOT_TOKEN` | ✅ | From @BotFather |
-| `TELEGRAM_CHAT_ID` | ✅ | Your channel ID e.g. `-1001234567890` |
+| `TELEGRAM_CHAT_ID` | ✅ | Your channel/group ID |
 
 > The bot auto-converts your `https://` RPC URL to `wss://` for WebSocket.  
 > No Alchemy Notify setup needed.
