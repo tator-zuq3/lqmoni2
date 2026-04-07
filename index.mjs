@@ -33,6 +33,14 @@ const VIP_ADMINS    = (process.env.VIP_ADMINS || '')
 const VIP_REWARD_ADMINS = (process.env.VIP_REWARD_ADMINS || '')
   .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
 
+// Address labels: ADDRESS_LABELS=0xabc:proxy,0xdef:team
+// Displays as: 0xabc (proxy)
+const LABELS = {};
+(process.env.ADDRESS_LABELS || '').split(',').forEach(pair => {
+  const [addr, ...rest] = pair.trim().split(':');
+  if (addr && rest.length) LABELS[addr.toLowerCase()] = rest.join(':');
+});
+
 // Convert Alchemy http url → wss url automatically
 const RPC_WS = RPC_HTTP.replace('https://', 'wss://').replace('http://', 'ws://');
 
@@ -123,6 +131,13 @@ function esc(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+// Format address with label if available
+function label(addr) {
+  const low = String(addr).toLowerCase();
+  const tag = LABELS[low];
+  return tag ? `<code>${addr}</code> <b>(${esc(tag)})</b>` : `<code>${addr}</code>`;
+}
+
 function decodeRewards(inputData) {
   try {
     const { args } = decodeFunctionData({ abi: DEPLOY_ABI, data: inputData });
@@ -165,8 +180,8 @@ function buildTelegramMessage(eventArgs, from, txHash, inputData) {
     `🪙 <b>${esc(a.tokenName)} ($${esc(a.tokenSymbol)})</b>`,
     '',
     `📍 <b>Token:</b> <code>${a.tokenAddress}</code>`,
-    `👤 <b>Deployer:</b> <code>${from}</code>`,
-    `👑 <b>Admin:</b> <code>${a.tokenAdmin}</code>`,
+    `👤 <b>Deployer:</b> ${label(from)}`,
+    `👑 <b>Admin:</b> ${label(a.tokenAdmin)}`,
   ];
   if (image) lines.push(`🖼️ <b>Image:</b> ${esc(image)}`);
   lines.push(
@@ -179,8 +194,8 @@ function buildTelegramMessage(eventArgs, from, txHash, inputData) {
 
   if (admins.length > 0) {
     lines.push('');
-    admins.forEach((addr, i) =>     lines.push(`💰 <b>Reward Admin ${i+1}:</b> <code>${addr}</code>`));
-    recipients.forEach((addr, i) => lines.push(`💰 <b>Reward Recipient ${i+1}:</b> <code>${addr}</code>`));
+    admins.forEach((addr, i) =>     lines.push(`💰 <b>Reward Admin ${i+1}:</b> ${label(addr)}`));
+    recipients.forEach((addr, i) => lines.push(`💰 <b>Reward Recipient ${i+1}:</b> ${label(addr)}`));
   }
 
   if (Object.keys(meta).length > 0) {
