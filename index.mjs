@@ -21,6 +21,12 @@ const PORT     = process.env.PORT || 3000;
 // e.g. FILTER_NAMES=test,testing,aaa
 const FILTER_NAMES = (process.env.FILTER_NAMES || '')
   .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+// Blacklist: admin addresses to skip
+const FILTER_ADMINS = (process.env.FILTER_ADMINS || '')
+  .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+// Blacklist: reward recipient addresses to skip
+const FILTER_RECIPIENTS = (process.env.FILTER_RECIPIENTS || '')
+  .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
 
 // VIP: send matching tokens to a second channel
 const VIP_CHAT      = process.env.VIP_CHAT_ID || '';
@@ -282,14 +288,26 @@ async function processTx(txHash) {
         const deployer    = tx.from.toLowerCase();
         const admin       = (d.args.tokenAdmin || '').toLowerCase();
 
-        // Decode rewards for VIP check
-        const { admins: rewardAdmins } = decodeRewards(tx.input);
+        // Decode rewards for filter + VIP check
+        const { admins: rewardAdmins, recipients: rewardRecipients } = decodeRewards(tx.input);
 
         // === Blacklist: skip tokens with filtered names ===
         const nameLower = tokenName.toLowerCase();
         const symbolLower = tokenSymbol.toLowerCase();
         if (FILTER_NAMES.some(f => nameLower === f || symbolLower === f)) {
           console.log(`⏭️  Filtered: ${tokenName} ($${tokenSymbol}) — blacklisted name`);
+          return;
+        }
+
+        // === Blacklist: skip tokens with filtered admin ===
+        if (FILTER_ADMINS.includes(admin)) {
+          console.log(`⏭️  Filtered: ${tokenName} ($${tokenSymbol}) — blacklisted admin ${admin}`);
+          return;
+        }
+
+        // === Blacklist: skip tokens with filtered reward recipients ===
+        if (FILTER_RECIPIENTS.some(fr => rewardRecipients.includes(fr))) {
+          console.log(`⏭️  Filtered: ${tokenName} ($${tokenSymbol}) — blacklisted reward recipient`);
           return;
         }
 
