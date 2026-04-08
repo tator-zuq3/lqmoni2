@@ -158,7 +158,10 @@ function pickImage(eventArgs, meta, ctx) {
     meta?.tokenImage,
   ];
   for (const c of candidates) {
-    if (c && typeof c === 'string' && c.startsWith('http')) return c;
+    if (!c || typeof c !== 'string') continue;
+    if (c.startsWith('http')) return c;
+    // Convert ipfs:// to https gateway
+    if (c.startsWith('ipfs://')) return 'https://cloudflare-ipfs.com/ipfs/' + c.slice(7);
   }
   return null;
 }
