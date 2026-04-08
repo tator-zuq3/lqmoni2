@@ -226,36 +226,33 @@ function buildTelegramMessage(eventArgs, from, txHash, inputData) {
     });
   }
 
-  // Image URL goes at the very end so Telegram auto-previews it
-  if (image) lines.push('', image);
-  else lines.push('',
+  lines.push('',
     `🔗 <a href="https://basescan.org/tx/${txHash}">View TX</a>  |  ` +
     `<a href="https://basescan.org/token/${a.tokenAddress}">Token</a>`
   );
-
-  // If there's an image, add links before it so they don't get previewed
-  if (image) {
-    lines.splice(lines.length - 1, 0,
-      `🔗 <a href="https://basescan.org/tx/${txHash}">View TX</a>  |  ` +
-      `<a href="https://basescan.org/token/${a.tokenAddress}">Token</a>`
-    );
-  }
 
   return { text: lines.join('\n'), image };
 }
 
 // ─── Telegram ─────────────────────────────────────────────────────────────────
-async function sendTelegram(text, hasImage = false, chatId = TG_CHAT) {
+async function sendTelegram(text, imageUrl = null, chatId = TG_CHAT) {
   try {
+    // Try sendPhoto if image URL available
+    if (imageUrl) {
+      const photoRes = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendPhoto`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, photo: imageUrl, caption: text, parse_mode: 'HTML' }),
+      });
+      const photoJson = await photoRes.json();
+      if (photoJson.ok) return; // success
+      console.warn('sendPhoto failed, falling back to text:', photoJson.description);
+    }
+    // Fallback: send as text message
     const res = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text,
-        parse_mode: 'HTML',
-        disable_web_page_preview: !hasImage,
-      }),
+      body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML', disable_web_page_preview: true }),
     });
     const json = await res.json();
     if (!json.ok) console.error('Telegram error:', json.description);
@@ -300,7 +297,7 @@ async function processTx(txHash) {
         const { text, image } = buildTelegramMessage(d.args, tx.from, txHash, tx.input);
 
         // Send to main channel
-        await sendTelegram(text, !!image, TG_CHAT);
+        await sendTelegram(text, image, TG_CHAT);
 
         // === VIP: check if should also send to second channel ===
         if (VIP_CHAT) {
@@ -325,7 +322,7 @@ async function processTx(txHash) {
             interfaceMatchesVip;
 
           if (isVip) {
-            await sendTelegram('⭐ VIP\n\n' + text, !!image, VIP_CHAT);
+            await sendTelegram('⭐ VIP\n\n' + text, image, VIP_CHAT);
             console.log(`  ⭐ Also sent to VIP channel`);
           }
         }
