@@ -32,6 +32,14 @@ const VIP_ADMINS    = (process.env.VIP_ADMINS || '')
   .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
 const VIP_REWARD_ADMINS = (process.env.VIP_REWARD_ADMINS || '')
   .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+// VIP image domains: trigger VIP when image URL contains these domains
+// e.g. VIP_IMAGE_DOMAINS=supabase.co,cloudinary.com
+const VIP_IMAGE_DOMAINS = (process.env.VIP_IMAGE_DOMAINS || '')
+  .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+// VIP interfaces: trigger VIP when context.interface matches (exact, case-sensitive)
+// e.g. VIP_INTERFACES=Liquid Protocol
+const VIP_INTERFACES = (process.env.VIP_INTERFACES || '')
+  .split(',').map(s => s.trim()).filter(Boolean);
 
 // Address labels: ADDRESS_LABELS=0xabc:proxy,0xdef:team
 // Displays as: 0xabc (proxy)
@@ -296,11 +304,25 @@ async function processTx(txHash) {
 
         // === VIP: check if should also send to second channel ===
         if (VIP_CHAT) {
+          // Parse context for interface check
+          let ctx = {};
+          try { ctx = JSON.parse(d.args.tokenContext || '{}'); } catch {}
+          const ctxInterface = ctx.interface || '';
+
+          // Check image domain
+          const tokenImage = d.args.tokenImage || '';
+          const imageMatchesVip = VIP_IMAGE_DOMAINS.some(dom => tokenImage.toLowerCase().includes(dom));
+
+          // Check interface
+          const interfaceMatchesVip = VIP_INTERFACES.some(vi => ctxInterface === vi);
+
           const isVip =
             VIP_NAMES.some(n => nameLower.includes(n) || symbolLower.includes(n)) ||
             VIP_DEPLOYERS.includes(deployer) ||
             VIP_ADMINS.includes(admin) ||
-            VIP_REWARD_ADMINS.some(va => rewardAdmins.includes(va));
+            VIP_REWARD_ADMINS.some(va => rewardAdmins.includes(va)) ||
+            imageMatchesVip ||
+            interfaceMatchesVip;
 
           if (isVip) {
             await sendTelegram('⭐ VIP\n\n' + text, !!image, VIP_CHAT);
