@@ -169,7 +169,7 @@ function pickImage(eventArgs, meta, ctx) {
     if (!c || typeof c !== 'string') continue;
     if (c.startsWith('http')) return c;
     // Convert ipfs:// to https gateway
-    if (c.startsWith('ipfs://')) return 'https://cloudflare-ipfs.com/ipfs/' + c.slice(7);
+    if (c.startsWith('ipfs://')) return 'https://ipfs.io/ipfs/' + c.slice(7);
   }
   return null;
 }
