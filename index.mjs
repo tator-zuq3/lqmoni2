@@ -244,7 +244,8 @@ function buildTelegramMessage(eventArgs, from, txHash, inputData) {
 
   lines.push('',
     `🔗 <a href="https://basescan.org/tx/${txHash}">View TX</a>  |  ` +
-    `<a href="https://basescan.org/token/${a.tokenAddress}">Token</a>`
+    `<a href="https://basescan.org/token/${a.tokenAddress}">Token</a>  |  ` +
+    `<a href="https://app.liquidprotocol.org/tokens/${a.tokenAddress}">Liquid</a>`
   );
 
   return { text: lines.join('\n'), image };
