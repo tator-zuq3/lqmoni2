@@ -46,6 +46,16 @@ const VIP_IMAGE_DOMAINS = (process.env.VIP_IMAGE_DOMAINS || '')
 // e.g. VIP_INTERFACES=Liquid Protocol
 const VIP_INTERFACES = (process.env.VIP_INTERFACES || '')
   .split(',').map(s => s.trim()).filter(Boolean);
+// VIP context matches: trigger VIP when context/metadata object has matching key:value
+// e.g. VIP_CONTEXT_MATCHES=interface:Retake Terminal,platform:Twitter,id:retakedottv
+const VIP_CONTEXT_MATCHES = (process.env.VIP_CONTEXT_MATCHES || '')
+  .split(',')
+  .map(s => {
+    const idx = s.indexOf(':');
+    if (idx === -1) return null;
+    return { key: s.slice(0, idx).trim().toLowerCase(), value: s.slice(idx + 1).trim().toLowerCase() };
+  })
+  .filter(Boolean);
 
 // Address labels: ADDRESS_LABELS=0xabc:proxy,0xdef:team
 // Displays as: 0xabc (proxy)
@@ -331,13 +341,34 @@ async function processTx(txHash) {
           // Check interface
           const interfaceMatchesVip = VIP_INTERFACES.some(vi => ctxInterface === vi);
 
+          // Check dynamic context & metadata matches
+          let meta = {};
+          try { meta = JSON.parse(d.args.tokenMetadata || '{}'); } catch {}
+          const combinedData = { ...meta, ...ctx };
+          
+          const contextMatchesVip = VIP_CONTEXT_MATCHES.some(m => {
+            function checkMatch(obj) {
+              if (!obj || typeof obj !== 'object') return false;
+              if (Array.isArray(obj)) return obj.some(item => checkMatch(item));
+              for (const key of Object.keys(obj)) {
+                if (key.toLowerCase() === m.key && String(obj[key]).toLowerCase() === m.value) {
+                  return true;
+                }
+                if (checkMatch(obj[key])) return true;
+              }
+              return false;
+            }
+            return checkMatch(combinedData);
+          });
+
           const isVip =
             VIP_NAMES.some(n => nameLower.includes(n) || symbolLower.includes(n)) ||
             VIP_DEPLOYERS.includes(deployer) ||
             VIP_ADMINS.includes(admin) ||
             VIP_REWARD_ADMINS.some(va => rewardAdmins.includes(va)) ||
             imageMatchesVip ||
-            interfaceMatchesVip;
+            interfaceMatchesVip ||
+            contextMatchesVip;
 
           if (isVip) {
             await sendTelegram('⭐ VIP\n\n' + text, image, VIP_CHAT);
